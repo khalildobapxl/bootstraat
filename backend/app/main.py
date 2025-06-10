@@ -1,5 +1,5 @@
-from bootstraat.backend.app.domain.models import *
-from bootstraat.backend.app.domain.dto import *
+from .domain.models import *
+from .domain.dto import *
 
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -100,8 +100,12 @@ async def create_artist(
 async def get_artists(
     session: AsyncSession = Depends(get_session),
 ) -> List[ArtistResponse]:
+
     artists = await session.exec(select(Artist).order_by(Artist.id))
-    
+
+    if artists.all() == []:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No artists found.")
+
     return artists.all()
 
 
