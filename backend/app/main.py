@@ -1,17 +1,31 @@
+import logging
 from .domain.models import *
 from .domain.dto import *
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from datetime import datetime
 from typing import AsyncGenerator, Optional
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlmodel import SQLModel, Field, Relationship, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, selectinload
 from fastapi.middleware.cors import CORSMiddleware
 
-DATABASE_URL = "sqlite+aiosqlite:///bootstraat.db"
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Base directory for the database
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "bootstraat.db"
+
+DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 engine: AsyncEngine = create_async_engine(DATABASE_URL, echo=True, future=True)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -40,22 +54,36 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+# region Events
+
+# Should add (title, date, artist) constraint to avoid duplicates
+
 
 @app.post("/events", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
 async def create_event(
     payload: EventCreate, session: AsyncSession = Depends(get_session)
-):
+) -> EventResponse:
+
     event = Event.model_validate(payload)
-    artist = await session.select(Artist).where(Artist.title == payload.artist_name)
-    if artist.all() == []:
+    result = await session.exec(
+        select(Artist).where(Artist.title == payload.artist_name)
+    )
+
+    artist = result.first()
+
+    if artist is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Artist '{payload.artist_name}' not found.",
         )
-    event.artist = artist.first()
+
+    event.artist_id = artist.id
+    event.artist = artist
+
     session.add(event)
     await session.commit()
-    await session.refresh(event)
+    await session.refresh(event, attribute_names=["artist"])
+
     return event
 
 
@@ -63,19 +91,36 @@ async def create_event(
 async def get_events(
     session: AsyncSession = Depends(get_session),
 ) -> List[EventResponse]:
-    events = await session.exec(
+    result = await session.exec(
         select(Event)
+        .options(selectinload(Event.artist))
         .where(Event.start_date >= datetime.now())
         .order_by(Event.start_date)
     )
-    if events.all() == []:
+
+    events = result.all()
+
+    if not events:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No upcoming events found.")
-    return events.all()
+
+    logger.info(f"Retrieved events: {events}")
+
+    return events
 
 
 @app.get("/events/{event_id}", response_model=EventResponse)
-async def get_event(event_id: int, session: AsyncSession = Depends(get_session)):
-    event = await session.get(Event, event_id)
+async def get_event(
+    event_id: int, session: AsyncSession = Depends(get_session)
+) -> EventResponse:
+
+    result = await session.exec(
+        select(Event).where(Event.id == event_id).options(selectinload(Event.artist))
+    )
+
+    event = result.first()
+
+    logger.info(f"Retrieved event: {event}")
+
     if not event:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Event not found."
@@ -83,16 +128,71 @@ async def get_event(event_id: int, session: AsyncSession = Depends(get_session))
     return event
 
 
+# @app.put("/events/{event_id}", response_model=EventResponse)
+# async def update_event(
+#     event_id: int,
+#     payload: EventCreate,
+#     session: AsyncSession = Depends(get_session),
+# ) -> EventResponse:
+
+#     event = await session.get(Event, event_id)
+#     if not event:
+#         raise HTTPException(
+#             status_code=status.HTTP_404_NOT_FOUND, detail="Event not found."
+#         )
+
+#     # Update the event fields
+#     for field, value in payload.model_dump().items():
+#         setattr(event, field, value)
+
+#     result = await session.exec(
+#         select(Artist).where(Artist.title == payload.artist_name)
+#     )
+#     artist = result.first()
+
+#     if artist is None:
+#         raise HTTPException(
+#             status_code=status.HTTP_404_NOT_FOUND,
+#             detail=f"Artist '{payload.artist_name}' not found.",
+#         )
+
+#     event.artist = artist
+
+#     await session.commit()
+#     await session.refresh(event)
+
+#     return event
+
+
+@app.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_event(event_id: int, session: AsyncSession = Depends(get_session)):
+    event = await session.get(Event, event_id)
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event not found."
+        )
+
+    await session.delete(event)
+    await session.commit()
+    logging.info(f"Deleted event with ID: {event_id}")
+
+
+# endregion
+
+# region Artists
+
+
 @app.post(
     "/artists", response_model=ArtistResponse, status_code=status.HTTP_201_CREATED
 )
 async def create_artist(
     payload: ArtistCreate, session: AsyncSession = Depends(get_session)
-):
+) -> ArtistResponse:
     artist = Artist.model_validate(payload)
     session.add(artist)
+    logging.info(f"Creating artist: {artist.title}")
     await session.commit()
-    await session.refresh(artist)
+    await session.refresh(artist, attribute_names=["events"])
     return artist
 
 
@@ -101,36 +201,84 @@ async def get_artists(
     session: AsyncSession = Depends(get_session),
 ) -> List[ArtistResponse]:
 
-    artists = await session.exec(select(Artist).order_by(Artist.id))
+    artists = await session.exec(
+        select(Artist).order_by(Artist.id).options(selectinload(Artist.events))
+    )
 
-    if artists.all() == []:
+    artists_objects = artists.all()
+    logging.info(f"Retrieved artists: {artists_objects}")
+
+    if artists_objects is None or len(artists_objects) == 0:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No artists found.")
 
-    return artists.all()
+    return artists_objects
 
 
 @app.get("/artists/{artist_id}", response_model=ArtistResponse)
-async def get_artist(artist_id: int, session: AsyncSession = Depends(get_session)):
+async def get_artist(
+    artist_id: int, session: AsyncSession = Depends(get_session)
+) -> ArtistResponse:
+    result = await session.exec(
+        select(Artist)
+        .where(Artist.id == artist_id)
+        .options(selectinload(Artist.events))
+    )
+
+    artist = result.first()
+    if not artist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Artist not found."
+        )
+
+    return artist
+
+
+@app.delete("/artists/{artist_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_artist(artist_id: int, session: AsyncSession = Depends(get_session)):
     artist = await session.get(Artist, artist_id)
     if not artist:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Artist not found."
         )
-    return artist
 
+    await session.delete(artist)
+    await session.commit()
+    logging.info(f"Deleted artist with ID: {artist_id}")
+
+# @app.put("/artists/{artist_id}", response_model=ArtistResponse)
+
+# endregion
+
+# region Visitors
 
 @app.post(
     "/visitors", response_model=VisitorResponse, status_code=status.HTTP_201_CREATED
 )
 async def create_visitor(
     payload: VisitorCreate, session: AsyncSession = Depends(get_session)
-):
-    visitor = Visitor.model_validate(payload)
+) -> VisitorResponse:
+    visitor = Visitor(name=payload.name, email=payload.email, phone=payload.phone)
     session.add(visitor)
     await session.commit()
     await session.refresh(visitor)
-    return visitor
 
+    # Link to events via Registration
+    regs = []
+    if payload.event_ids:
+        for eid in payload.event_ids:
+            evt = await session.get(Event, eid)
+            if not evt:
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND,
+                    detail=f"Event {eid} not found."
+                )
+            regs.append(Registration(event_id=eid, visitor_id=visitor.id))
+        session.add_all(regs)
+        await session.commit()
+
+    await session.refresh(visitor, attribute_names=["events"])
+
+    return visitor
 
 @app.get("/visitors", response_model=List[VisitorResponse])
 async def get_visitors(
@@ -141,13 +289,20 @@ async def get_visitors(
 
 
 @app.get("/visitors/{visitor_id}", response_model=VisitorResponse)
-async def get_visitor(visitor_id: int, session: AsyncSession = Depends(get_session)):
+async def get_visitor(
+    visitor_id: int, session: AsyncSession = Depends(get_session)
+) -> VisitorResponse:
     visitor = await session.get(Visitor, visitor_id)
     if not visitor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Visitor not found."
         )
     return visitor
+
+
+# endregion
+
+# region register
 
 
 @app.post("/register", status_code=status.HTTP_201_CREATED)
@@ -160,6 +315,8 @@ async def create_registration(
     await session.refresh(registration)
     return {"message": "Registration created successfully."}
 
+
+# endregion
 
 if __name__ == "__main__":
     import uvicorn

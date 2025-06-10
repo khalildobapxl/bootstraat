@@ -1,45 +1,58 @@
+from typing import List, Optional
 from sqlmodel import SQLModel
+from datetime import datetime
+
+from backend.app.domain.models import Artist, Event
 
 
 class EventCreate(SQLModel):
     title: str
     description: str
-    start_date: str  # ISO format date string
+    start_date: datetime  # ISO format datetime
     capacity: int
-    artist_name: int
-
+    artist_name: Optional[str] = None
 
 class EventResponse(SQLModel):
     id: int
     title: str
     description: str
-    start_date: str  # ISO format date string
+    start_date: datetime  # ISO format datetime
     capacity: int
-    artist_name: str
+    artist: Optional[Artist] = None
 
 
 class ArtistCreate(SQLModel):
     title: str
-    description: str
+    description: Optional[str] = None
 
 
 class ArtistResponse(SQLModel):
     id: int
     title: str
-    description: str
+    description: Optional[str] = None
+    events: Optional[List[EventResponse]] = None
+
+    class Config:
+        orm_mode = True
+        exclude_none = True
 
 
 class VisitorCreate(SQLModel):
-    name: str
+    name:  str
     email: str
     phone: str
+    event_ids: Optional[List[int]] = None
 
 
 class VisitorResponse(SQLModel):
-    id: int
-    name: str
-    email: str
-    phone: str
+    id:      int
+    name:    str
+    email:   str
+    phone:   str
+    events:  List[EventResponse] = []
+
+    class Config:
+        orm_mode = True
 
 
 class RegistrationCreate(SQLModel):

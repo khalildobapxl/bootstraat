@@ -39,7 +39,7 @@ class Artist(SQLModel, table=True):
     __tablename__ = "artists"
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
-    description: str
+    description: Optional[str] = None
     events: List[Event] = Relationship(back_populates="artist")
 
 
