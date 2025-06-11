@@ -2,7 +2,7 @@ from typing import List, Optional
 from sqlmodel import SQLModel
 from datetime import datetime
 
-from backend.app.domain.models import Artist, Event
+from backend.app.domain.models import Artist, Event, Status
 
 
 class EventCreate(SQLModel):
@@ -54,8 +54,13 @@ class VisitorResponse(SQLModel):
     class Config:
         orm_mode = True
 
+class VisitorUpdate(SQLModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    event_ids: Optional[List[int]] = None
 
 class RegistrationCreate(SQLModel):
     event_id: int
     visitor_id: int
-    status: str  # Should be one of the Status enum values
+    status: Status = "PENDING"  # Should be one of the Status enum values

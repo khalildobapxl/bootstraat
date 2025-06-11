@@ -245,11 +245,13 @@ async def delete_artist(artist_id: int, session: AsyncSession = Depends(get_sess
     await session.commit()
     logging.info(f"Deleted artist with ID: {artist_id}")
 
+
 # @app.put("/artists/{artist_id}", response_model=ArtistResponse)
 
 # endregion
 
 # region Visitors
+
 
 @app.post(
     "/visitors", response_model=VisitorResponse, status_code=status.HTTP_201_CREATED
@@ -269,8 +271,7 @@ async def create_visitor(
             evt = await session.get(Event, eid)
             if not evt:
                 raise HTTPException(
-                    status.HTTP_404_NOT_FOUND,
-                    detail=f"Event {eid} not found."
+                    status.HTTP_404_NOT_FOUND, detail=f"Event {eid} not found."
                 )
             regs.append(Registration(event_id=eid, visitor_id=visitor.id))
         session.add_all(regs)
@@ -280,19 +281,36 @@ async def create_visitor(
 
     return visitor
 
+
 @app.get("/visitors", response_model=List[VisitorResponse])
 async def get_visitors(
     session: AsyncSession = Depends(get_session),
 ) -> List[VisitorResponse]:
-    visitors = await session.exec(select(Visitor).order_by(Visitor.id))
-    return visitors.all()
+    result = await session.exec(
+        select(Visitor).order_by(Visitor.id).options(selectinload(Visitor.events))
+    )
+
+    visitors = result.all()
+    if not visitors or len(visitors) == 0:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No visitors found.")
+
+    logging.info(f"Retrieved visitors: {visitors}")
+    return visitors
 
 
 @app.get("/visitors/{visitor_id}", response_model=VisitorResponse)
 async def get_visitor(
     visitor_id: int, session: AsyncSession = Depends(get_session)
 ) -> VisitorResponse:
-    visitor = await session.get(Visitor, visitor_id)
+    result = await session.exec(
+        select(Visitor)
+        .where(Visitor.id == visitor_id)
+        .options(selectinload(Visitor.events))
+    )
+
+    visitor = result.first()
+    logging.info(f"Retrieved visitor: {visitor}")
+
     if not visitor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Visitor not found."
@@ -300,20 +318,104 @@ async def get_visitor(
     return visitor
 
 
+@app.delete("/visitors/{visitor_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_visitor(visitor_id: int, session: AsyncSession = Depends(get_session)):
+    visitor = await session.get(Visitor, visitor_id)
+    if not visitor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Visitor not found."
+        )
+
+    await session.delete(visitor)
+    await session.commit()
+    logging.info(f"Deleted visitor with ID: {visitor_id}")
+
+
 # endregion
 
 # region register
 
 
+# Still need to be improved, capacity shouldn't be changed, another field should be added to the event model
+# to track the number of registrations, and the capacity should be checked against that field.
+# Look into transactions and how to handle them properly in SQLAlchemy. because if two requests come in at the same time, they might both pass the capacity check
+# and create registrations, exceeding the event's capacity. + We are doing write and read operations, if an exception occurs, we should rollback the transaction manually.
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 async def create_registration(
     payload: RegistrationCreate, session: AsyncSession = Depends(get_session)
 ):
     registration = Registration.model_validate(payload)
+
+    # Check if the event exists
+    event = await session.get(Event, registration.event_id)
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Event with ID {registration.event_id} not found.",
+        )
+    # Check if the visitor exists
+    visitor = await session.get(Visitor, registration.visitor_id)
+    if not visitor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Visitor with ID {registration.visitor_id} not found.",
+        )
+    # Check if the visitor is already registered for the event
+    existing_registration = await session.get(
+        Registration, (registration.event_id, registration.visitor_id)
+    )
+    if existing_registration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Visitor {registration.visitor_id} is already registered for event {registration.event_id}.",
+        )
+    # Check if the event has reached its capacity
+    if event.capacity <= len(event.visitors):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Event {registration.event_id} has reached its capacity.",
+        )
+
     session.add(registration)
+    event.capacity -= 1  # Decrease the event capacity
+    registration.status = Status.APPROVED
+    logging.info(
+        f"Creating registration for event {registration.event_id} and visitor {registration.visitor_id}"
+    )
+
     await session.commit()
     await session.refresh(registration)
     return {"message": "Registration created successfully."}
+
+
+@app.get("/register", response_model=List[Registration])
+async def get_registrations(
+    session: AsyncSession = Depends(get_session),
+) -> List[Registration]:
+    result = await session.exec(select(Registration))
+    registrations = result.all()
+    logging.info(f"Retrieved registrations: {registrations}")
+
+    if not registrations:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No registrations found.")
+
+    return registrations
+
+
+@app.delete("/register/{event_id}/{visitor_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_registration(
+    event_id: int, visitor_id: int, session: AsyncSession = Depends(get_session)
+):
+    registration = await session.get(Registration, (event_id, visitor_id))
+    if not registration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Registration not found.",
+        )
+
+    await session.delete(registration)
+    await session.commit()
+    logging.info(f"Deleted registration for event {event_id} and visitor {visitor_id}.")
 
 
 # endregion

@@ -6,9 +6,9 @@ from datetime import datetime
 
 
 class Status(str, Enum):
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
 
 
 class Registration(SQLModel, table=True):
